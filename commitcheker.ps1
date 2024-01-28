@@ -8,8 +8,8 @@ $repositoryresponse = Invoke-RestMethod -Uri $projectreport -Method Get -Headers
    # Define SMTP server settings
    $SMTP_SERVER = "smtp.office365.com"
    $SMTP_PORT = 587  # Typically 587 for TLS/STARTTLS, or 465 for SSL
-   $SMTP_USERNAME = "taraka.gudise@outlook.com"
-   $SMTP_PASSWORD = "MyP0!yc0m@123"
+   $SMTP_USERNAME = <Enter EmailID>
+   $SMTP_PASSWORD = <Enter Password>
    $UseSsl = $true  # Set to $true for TLS/STARTTLS, or $false for no SSL
    
    # Create a new SMTP client
