@@ -1,0 +1,398 @@
+param ([string]$info="Password")
+<#
+
+Project Reporting script for VSTS
+
+This script sends emails to all developers, testers, and product managers notifying them
+of Open workitems list and send a gentle reminder to the Workitem owner and respective leads to say hey from these Many days your workitem is pending
+
+
+#>
+Add-Type -AssemblyName System.Web
+
+# Get the script directory
+$path= "\common.ps1"
+# # Load and execute the common library script
+$commonLibContent = Get-Content -Path $Path -Raw
+Invoke-Expression -Command $commonLibContent
+
+# $infoLibPath = (Join-Path (Join-Path $scriptDirectory -ChildPath "common") -ChildPath "info.ps1")
+# . $infoLibPath
+
+# $infoLibPath = (Join-Path $PSScriptRoot -ChildPath "project_reporting_common.ps1")
+# . $infoLibPath
+$WorkitemSummaryHtml = "<h1>Open Work Items in Completed Sprints</h1>"
+
+$WorkitemSummaryHtml +="<tbody><table border='1' cellspacing='1' style='font-size:10px; border:1px solid black; border-collapse: collapse' nowrap>
+    <tr style='font-size:12px;'>
+        <th valign='top' nowrap><b>Person</b></th>
+        <th valign='top' nowrap><b>Number of open Work <br>Items in Completed Sprints</b></th>
+        <th valign='top' ><b>Tasks</b></th>
+        <th valign='top' ><b>PBIs</b></th>
+        <th valign='top' ><b>Bugs</b></th>
+        <th valign='top' ><b>Features</b></th>
+        <th valign='top' ><b>Epics</b></th>
+        <th valign='top' ><b>Earliest Sprint with Open Work Items</b></th>
+        
+    </tr>"
+$WorkitemDetailsHtml = "<h1>Work Items Details</h1>"
+$WorkitemDetailsHtml +="<tbody><table border='1' cellspacing='1' style='font-size:10px; border:1px solid black; border-collapse: collapse' nowrap>
+    <tr style='font-size:12px;'>
+        <th valign='top' nowrap><b>Person</b></th>
+        <th valign='top' nowrap><b>WorkItemType</b></th>
+        <th valign='top' nowrap><b>WorkItem</b></th>
+        <th valign='top' ><b>Sprint</b></th>
+        <th valign='top' ><b>Number of Days Overdue</b></th>
+    </tr>"
+function Get-WorkItemUpdate {
+    $WorkItemUpdate = New-Object -TypeName PSObject
+    $WorkItemUpdate| Add-Member -MemberType NoteProperty -Name person -Value $null
+    $WorkItemUpdate| Add-Member -MemberType NoteProperty -Name state -Value $null
+    $WorkItemUpdate| Add-Member -MemberType NoteProperty -Name WorkItemType -Value $null
+    $WorkItemUpdate| Add-Member -MemberType NoteProperty -Name WorkItemId -Value $null
+    $WorkItemUpdate| Add-Member -MemberType NoteProperty -Name Sprint -Value $null
+    $WorkItemUpdate| Add-Member -MemberType NoteProperty -Name Title -Value $null
+    $WorkItemUpdate| Add-Member -MemberType NoteProperty -Name mailid -Value $null
+    return $WorkItemUpdate
+    
+}
+function Get-SprintDetails {
+    $SprintDetails = New-Object -TypeName PSObject
+    $SprintDetails| Add-Member -MemberType NoteProperty -Name startDate -Value $null
+    $SprintDetails| Add-Member -MemberType NoteProperty -Name endDate -Value $null
+    $SprintDetails| Add-Member -MemberType NoteProperty -Name sprintNumber -Value $null
+    return $SprintDetails
+    
+}
+function Get-WorkItemInfo {
+    $WorkItemInfo = New-Object -TypeName PSObject
+    $WorkItemInfo| Add-Member -MemberType NoteProperty -Name person -Value $null
+    $WorkItemInfo| Add-Member -MemberType NoteProperty -Name openWorkItems -Value $null
+    $WorkItemInfo| Add-Member -MemberType NoteProperty -Name Tasks -Value $null
+    $WorkItemInfo| Add-Member -MemberType NoteProperty -Name PBIs -Value $null
+    $WorkItemInfo| Add-Member -MemberType NoteProperty -Name Bugs -Value $null
+    $WorkItemInfo| Add-Member -MemberType NoteProperty -Name Epics -Value $null
+    $WorkItemInfo| Add-Member -MemberType NoteProperty -Name Features -Value $null
+    $WorkItemInfo| Add-Member -MemberType NoteProperty -Name EarliestSprint -Value $null
+    $WorkItemInfo| Add-Member -MemberType NoteProperty -Name wiqlId -Value $null
+    $WorkItemInfo| Add-Member -MemberType NoteProperty -Name mailid -Value $null
+    return $WorkItemInfo
+    
+}
+# $query = "
+# {
+#     "query": "SELECT [System.Id], [System.Title], [System.State], [System.AssignedTo], [System.IterationPath] FROM WorkItems WHERE [System.WorkItemType] = 'Task' AND [System.State] IN ('New', 'To Do', 'In Progress', 'Ready for Deployment', 'Ready for Testing') AND [System.IterationPath] <> 'abcd' AND [System.IterationPath] NOT UNDER 'abcd' ORDER BY [System.AssignedTo] ASC"
+# }
+# "
+$PATId = "4shokbf63trv4xr3wth635rgothfv57ii5n3odhh7eq2s5tccycq"
+$queryId = "343d58e6-67ad-48a1-9317-1403d32e1dab"
+
+$headers = @{
+    Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$($PATId)"))
+}
+# Convert the query to JSON
+# $jsonQuery = $query | ConvertTo-Json
+$latestSprint =Get-SprintInfo -forDate (Get-Date)
+$latestSprintNumber = $latestSprint.sprintNumber
+$sprintsCount = $latestSprintNumber/2
+$presentsprint = "$($project)\Sprint " + $latestSprintNumber
+$startDate = (Get-Date).AddMonths(-$sprintsCount).Date
+$endDate = Get-Date -DisplayHint Date
+$currentDate = $startDate
+$Sprintslists = @()
+while ($currentDate -le $endDate) {
+    $Sprintslist = Get-SprintInfo -forDate ($currentDate)
+    $currentDate = $currentDate.AddDays(14)
+    $SprintDetails = Get-SprintDetails
+    $SprintDetails.startDate = $Sprintslist.startDate
+    $SprintDetails.endDate = $Sprintslist.endDate
+    $SprintDetails.sprintNumber = $Sprintslist.sprintNumber
+    $Sprintslists += $SprintDetails
+}
+$WorkitemsQueryUri = "https://$($organization).visualstudio.com/DefaultCollection/_apis/wit/wiql/$($queryId)?api-version=4.1"
+$WorkitemsQueryResult = Invoke-RestMethod -Uri $WorkitemsQueryUri -Method Get -Headers $headers 
+$workitemrecords =@()
+# $workItemRelationsCount = $WorkitemsQueryResult.workItemRelations.Count
+$workItemIds = $WorkitemsQueryResult.workItemRelations
+$workupdates = @()
+foreach($workItemId in $workItemIds.target.id)
+{
+    # $sourceWorkItemId = $projectReportingQueryResult.workItemRelations[$i].source.id
+    # $targetWorkItemId = $WorkitemsQueryResult.workItemRelations[$i].target.id
+    
+    $workuri = "https://dev.azure.com/$($organization)/$($project)/_apis/wit/workitems?ids=$($workItemId)&api-version=7.1-preview.3"
+    $workresponse= Invoke-RestMethod -Uri $workuri -Method Get -Headers $headers 
+    $workItemResponse = $workresponse.value
+    for($i=0;$i -lt $workItemResponse.Count;$i++){
+        # $workupdates = $workItemResponse[$i].fields #|Where-Object {$_.'System.IterationPath' -eq "$($project)\Sprint 173"} 
+        $WorkItemUpdate = Get-WorkItemUpdate
+        if ($null -ne $workItemResponse[$i].fields.'System.AssignedTo'.displayName) {
+            $WorkItemUpdate.person = $workItemResponse[$i].fields.'System.AssignedTo'.displayName
+            $WorkItemUpdate.mailid = $workItemResponse[$i].fields.'System.AssignedTo'.uniqueName
+        }
+        else {
+            $WorkItemUpdate.person = "Unassigned"
+        }
+        
+        $WorkItemUpdate.state=  $workItemResponse[$i].fields.'System.state'
+        $WorkItemUpdate.WorkItemType = $workItemResponse[$i].fields.'System.WorkItemType'
+        $WorkItemUpdate.sprint = $workItemResponse[$i].fields.'System.IterationPath'
+        $WorkItemUpdate.Title = $workItemResponse[$i].fields.'System.Title'
+        $WorkItemUpdate.WorkItemId = $workItemId
+        $workupdates += $WorkItemUpdate
+    }
+}
+# $WIQL_TEMPLATE = @()
+# $WiqlResponce = @()
+$wiqlUri ="https://dev.azure.com/$($organization)/$($project)/_apis/wit/tempqueries?api-version=7.1-preview.1"
+# $latestSprintInfo = Get-SprintInfo -forDate (Get-Date)
+$openWorkItemslist =  $workupdates| Where-Object {$_.state -eq "New" -or $_.state -eq "To Do" -or $_.state -eq "In Progress" -or $_.state -eq "Ready for Deployment" -or $_.state -eq "Ready for Testing" -and $_.Sprint -lt $presentsprint -and $_.Sprint -ne "$($project)"}
+$openWorkItemsgroup =  $openWorkItemslist |Group-Object -Property WorkItemType | ForEach-Object {$_.Group}
+$persons = $openWorkItemslist | Select-Object -Property person -Unique
+#email ids of recievers
+# $emails =  $openWorkItemslist | Select-Object -Property mailid -Unique
+# $email=$persons.person
+# foreach($mail in $emails.mailid){
+    $email = @()
+# }
+foreach($person in $persons.person){
+    $openWorkItems = $openWorkItemsgroup| Where-Object {$_.person -eq $person } 
+    $mail = $openWorkItemsgroup| Where-Object {$_.person -eq $person } |Select-Object -Property mailid -Unique
+    $Sprintinfo =Get-SprintInfo -forDate (Get-Date)
+    $SprintNumber = $Sprintinfo.sprintNumber
+    if ($person -ne "Unassigned") {
+        $WIQL_TEMPLATE = "SELECT [System.Id],[System.AssignedTo],[System.State],[System.Title],[System.WorkItemType],[System.IterationPath] FROM workitems WHERE [System.AssignedTo] = '$person' AND [System.WorkItemType] In ('Task', 'Product Backlog Item', 'Bug', 'Feature', 'Epic') AND [System.State] In ('New', 'To Do', 'In Progress', 'Ready for Deployment', 'Ready for Testing') AND NOT [System.IterationPath] IN ('$($project)', '$($project)\Sprint $SprintNumber')" #
+        $email += $mail.mailid
+    }
+    elseif($null -eq $person -or $person -eq "Unassigned") {
+        $WIQL_TEMPLATE = "SELECT [System.Id],[System.AssignedTo],[System.State],[System.Title],[System.WorkItemType],[System.IterationPath] FROM workitems WHERE [System.AssignedTo] = '' AND [System.WorkItemType] In ('Task', 'Product Backlog Item', 'Bug', 'Feature', 'Epic') AND [System.State] In ('New', 'To Do', 'In Progress', 'Ready for Deployment', 'Ready for Testing') AND NOT [System.IterationPath] IN ('$($project)', '$($project)\Sprint $SprintNumber')" #AND [System.IterationPath] NOT UNDER ('$presentsprint')
+        
+    } 
+    $json = @{ wiql = $WIQL_TEMPLATE }
+    $jsonBody = ConvertTo-Json $json
+    $WiqlResponce = Invoke-RestMethod -Uri $wiqlUri -Method Post -ContentType "application/json" -Headers $headers -Body $jsonBody
+    
+    if ($openWorkItems.Count -gt 1) {
+        $openWorkItemsCount = [int]$openWorkItems.Count
+    }
+    elseif ($openWorkItems.Count -eq 0) {
+        $openWorkItemsCount = $null
+
+    }
+    else {
+        $openWorkItemsCount = Write-Output 1
+    }
+    $Tasks = $openWorkItems| Where-Object {$_.WorkItemType -eq "Task"}
+    if ($Tasks.Count -gt 1) {
+        $TasksCount = [int]$Tasks.Count
+    }
+    elseif ($Tasks.Count -eq 0) {
+        $TasksCount =$null
+
+    }
+    else {
+        $TasksCount = Write-Output 1
+    }
+    $PBIs = $openWorkItems| Where-Object {$_.WorkItemType -eq "Product Backlog Item" }
+    if ($PBIs.Count -gt 1) {
+        $PBIsCount= [int]$PBIs.Count
+    }
+    elseif ($PBIs.Count -eq 0) {
+        $PBIsCount =$null
+    }
+    else {
+        $PBIsCount = Write-Output 1
+    }
+    $Bugs = $openWorkItems| Where-Object {$_.WorkItemType -eq "Bug"}
+    if ($Bugs.Count -gt 1) {
+        $BugsCount= [int]$Bugs.Count
+    }
+    elseif ($Bugs.Count -eq 0) {
+        $BugsCount =$null
+    }
+    else {
+        $BugsCount = Write-Output 1
+    }
+    $Features = $openWorkItems| Where-Object {$_.WorkItemType -eq "Feature"}
+    if ($Features.Count -gt 1) {
+        $FeaturesCount = [int]$Features.Count
+    }
+    elseif ($Features.Count -eq 0) {
+        $FeaturesCount =$null
+    }
+    else {
+        $FeaturesCount = Write-Output 1
+    }
+    $Epics = $openWorkItems| Where-Object {$_.WorkItemType -eq "Epic"}
+    if ($Epics.Count -gt 1) {
+        $EpicsCount= [int]$Epics.Count
+    }
+    elseif ($Epics.Count -eq 0) {
+        $EpicsCount = $null
+    }
+    else {
+        $EpicsCount = Write-Output 1
+    }
+    $WorkItemInfo = Get-WorkItemInfo
+    $WorkItemInfo.person = $person
+    $WorkItemInfo.openWorkItems = $openWorkItemsCount
+    $WorkItemInfo.Tasks = $TasksCount
+    $WorkItemInfo.PBIs = $PBIsCount
+    $WorkItemInfo.Bugs = $BugsCount
+    $WorkItemInfo.Features = $FeaturesCount 
+    $WorkItemInfo.Epics = $EpicsCount
+    $WorkItemInfo.wiqlId = $WiqlResponce.id
+    $WorkItemInfo.mailid = $openWorkItems.mailid
+    $EarliestSprint = $openWorkItems.Sprint| Measure-Object -Maximum | Select-Object -ExpandProperty Maximum
+    $WorkItemInfo.EarliestSprint = $EarliestSprint
+    $workitemrecords += $WorkItemInfo
+   
+}
+
+# Sort the grouped items by the count of open work items in each group (descending order)
+# $sortedWorkItems = $workitemrecords|Where-Object {$_.openWorkItems -gt 0} 
+
+$sortedWorkItemslist = $workitemrecords | Sort-Object -Property openWorkItems,person -Descending
+
+foreach($sortedWorkItem in $sortedWorkItemslist){
+    if ($sortedWorkItem.openWorkItems -gt 5) {
+        $RowColor = '#ff0000'
+    }
+    else {
+        if ($sortedWorkItem.openWorkItems -le 5 -and $sortedWorkItem.openWorkItems -ge 3) {
+            $RowColor = '#FFA500'
+        }
+        elseif ($sortedWorkItem.openWorkItems -le 2 -and $sortedWorkItem.openWorkItems -ge 1) {
+            $RowColor = '#FFFF00'
+        }
+        else {
+            $RowColor = '#FFFFFF'
+        }
+    }
+    
+   
+    
+    # $json = @{ wiql = $WIQL_TEMPLATE }
+    # $jsonBody = ConvertTo-Json $json
+    # $WiqlResponce = Invoke-RestMethod -Uri $wiqlUri -Method Post -ContentType "application/json" -Headers $headers -Body $jsonBody
+    $WorkitemSummaryHtml += "<tr style='font-size:12px;' nowrap>
+        <td nowrap>$($sortedWorkItem.person)</td>
+        <td bgcolor='$($RowColor)' align ='right' nowrap><a href='https://$($organization).visualstudio.com/$($project)/_queries/query-edit/?tempQueryId=$($sortedWorkItem.wiqlId)/'>$($sortedWorkItem.openWorkItems)</a></td>
+        <td align ='right' nowrap>$($sortedWorkItem.Tasks)</td>
+        <td align ='right' nowrap> $($sortedWorkItem.PBIs)</td>
+        <td align ='right' nowrap>$($sortedWorkItem.Bugs)</td>
+        <td align ='right' nowrap>$($sortedWorkItem.Features)</td> 
+        <td align ='right' nowrap>$($sortedWorkItem.Epics)</td>  
+        <td nowrap>$($sortedWorkItem.EarliestSprint)</td>  
+    </tr>"
+ 
+}
+# Group the person records by the count of open work items
+$groupedopenWorkItems = $openWorkItemslist | Group-Object -Property person
+# # Sort the grouped items by the count of open work items in each group (descending order)
+$sortedopenWorkItemslist = $groupedopenWorkItems | Sort-Object -Property Count -Descending
+# $email=$sortedopenWorkItemslist.mailid
+$count = $sortedopenWorkItemslist.Count
+for ($i = 0; $i -lt $count; $i++) {
+    $sortedopenWorkItems = $sortedopenWorkItemslist[$i].Group
+    if ($sortedopenWorkItems.Count -gt 5) {
+        $CellColor = '#ff0000'
+    }
+    else {
+        if ($sortedopenWorkItems.Count -le 5 -and $sortedopenWorkItems.Count -ge 3) {
+            $CellColor = '#FFA500'
+        }
+        elseif ($sortedopenWorkItems.Count -le 2 -and $sortedopenWorkItems.Count -ge 1) {
+            $CellColor = '#FFFF00'
+        }
+        else {
+            $CellColor = '#FFFFFF'
+        }
+    }
+    # Get the current date
+    $currentDate = Get-Date
+    $sortedopenWorkItemsdetails= $sortedopenWorkItems|Sort-Object -Property WorkItemType
+    foreach($sortedopenWorkItem in $sortedopenWorkItemsdetails){
+        $openWorkItemId =$sortedopenWorkItem.WorkItemId
+        if ($null -ne $sortedopenWorkItem.person) {
+            $Openworkitemperson = $sortedopenWorkItem.person
+        }
+        elseif ($null -eq $sortedopenWorkItem.person) {
+            $Openworkitemperson =  "Unassigned"
+        }  
+       
+        $workItemtype = $sortedopenWorkItem.WorkItemType
+        $WorkItemtitle = $sortedopenWorkItem.title
+        $sprint = $sortedopenWorkItem.Sprint
+        if ($sprint -like "$($project)\Sprint*") {
+            $opensprintnumber = $sprint -replace "$($project)\\Sprint ",""
+            $opensprintDetails =  $Sprintslists |Where-Object {$_.sprintNumber -eq $opensprintnumber}
+        }
+        else {
+            $opensprintDetails =  $Sprintslists |Where-Object {$_.sprintNumber -eq 0}
+        }
+        
+        $sprintEndDate = $opensprintDetails.endDate
+        $daysDifference = (Get-Date) - $sprintEndDate
+        $numberOfDays = [Math]::Floor($daysDifference.TotalDays)
+        $WorkitemDetailsHtml += "<tr style='font-size:12px;' nowrap>
+            <td bgcolor='$($CellColor)' nowrap>$($Openworkitemperson)</td>
+            <td bgcolor='$($CellColor)' nowrap>$($workItemtype)</td>
+            <td style='width: 40%;' nowrap><a href='https://$($organization).visualstudio.com/$($project)/_workitems/edit/$($openWorkItemId)'>$($openWorkItemId)<b> - </b>$($WorkItemtitle)</a></td>
+            <td nowrap> $($sprint)</td>
+            <td nowrap> $($numberOfDays)</td>
+        </tr>"
+    }
+}
+
+# $WorkItemInfo| Where-Object {$_.IterationPath -eq "$($project)\Sprint 215"}|Format-Table
+$WorkitemSummaryHtml += "</table></tbody>"
+$WorkitemDetailsHtml += "</table></tbody>"
+
+$body += $WorkitemSummaryHtml
+$body += $WorkitemDetailsHtml 
+
+# # compose and send out email messages to individuals who have booked to at least one task in the sprint
+Write-Host "-------------------------------------------------------------------------------------------"
+Write-Host "Sending out emails"
+$email
+$emailSubject = "Open Work items Summary report"
+Start-Sleep -s 15
+
+$SMTP_SERVER = "smtp.socketlabs.com"
+$SMTP_PORT = 587
+$SMTP_USERNAME = "server4507"
+$PWORD = ConvertTo-SecureString -String $info -AsPlainText -Force
+$bccEmailList = ("")
+# $cred = New-Object -TypeName System.Management.Automation.PSCredential($SMTP_USERNAME, $PWORD)
+$SMTPClient = New-Object System.Net.Mail.SmtpClient
+$SMTPClient.Host = $SMTP_SERVER
+$SMTPClient.Port = $SMTP_PORT
+$SMTPClient.EnableSsl = $true
+$SMTPClient.Credentials = New-Object System.Net.NetworkCredential($SMTP_USERNAME, $PWORD)
+$message= New-Object System.Net.Mail.MailMessage
+$message.From = ""
+foreach($mailid in $email)
+{
+    $message.To.Add($mailid)
+}
+$ccmail = ""
+$message.Cc.Add($ccmail)
+$message.Subject = $emailSubject
+$message.Body = $body
+$message.Bcc.Add($bccEmailList)
+
+$message.IsBodyHtml = $true
+# Send-MailMessage -SmtpServer $SMTP_SERVER -Port $SMTP_PORT -Credential $cred -To $email -Bcc $bccEmailList -From tfsbuild@$($project).com -Subject $emailSubject -Body $body -BodyAsHtml
+try {
+    # Send-MailMessage -To $email -SmtpServer $SMTP_SERVER -Port $SMTP_PORT -Credential $cred -Bcc $bccEmailList -From tfsbuild@$($project).com -Subject $emailSubject -Body $body -BodyAsHtml
+    $SMTPClient.Send($message)
+    $SMTPClient.Dispose()
+    $message.Dispose()
+    
+}
+catch {
+    $_.Exception.message
+}
+
+# Stop-Transcript

@@ -1,0 +1,271 @@
+$WorkspaceID="Workspace ID"
+$query = ' KubePodInventory| join (ContainerInventory | project ContainerID, ImageTag, ImageID) on $left.ContainerID == $right.ContainerID| where TimeGenerated > now(-1h)| where Namespace != "kube-system"| where ClusterName contains "apxdevtest-usw-aks"| summarize arg_max(TimeGenerated, *) by Name| order by Namespace asc, TimeGenerated desc'
+# | where PodStatus !contains "Running"
+
+$InsightsQuery = Invoke-AzOperationalInsightsQuery -WorkspaceId $WorkspaceID -Query $query
+$InsightsQueryResult = $InsightsQuery.Results
+$ServiceNames=$InsightsQueryResult.ServiceName | Sort-Object -Unique
+# Extract unique namespaces from the result
+$Namespaces = $InsightsQueryResult.Namespace | Sort-Object -Unique
+$columnHeaders = @()
+# Extract the last part of the namespace and use it as column headers
+foreach ($Namespace in $Namespaces) {
+    $split = $Namespace.split('-')[-1]
+    $columnHeaders += $split
+}
+
+$columnHeaders = $columnHeaders | Sort-Object -Unique
+
+$date = Get-Date
+$utcDate = ([datetime]$date).ToUniversalTime()
+$currentDateTime = $utcDate.ToString("dd-MM-yyyy hh:mm:ss tt")
+
+$report = @"
+<!doctype html>
+<html>
+    <title>Kubernetes Pods Status Page</title>
+    <head>
+        <!-- Required meta tags -->
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+        <style>
+            /* Custom CSS to freeze the header row */
+            table {
+                border-collapse: collapse;
+                width: 100%;
+            }
+
+            th, td {
+                padding: 8px;
+                text-align: left;
+                border-bottom: 1px solid #ddd;
+            }
+
+            th {
+                background-color: #f2f2f2;
+                position: sticky;
+                top: 0;
+                z-index: 1;
+            }
+            td {
+                height: 25px;
+                width: 50px;
+            }
+            .expanded {
+                height: 100px;
+            }
+        </style>
+        <script>
+            function expandCell(cell){
+                cell.classList.toggle('expanded');
+            }
+        </script>
+        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0/css/bootstrap.min.css" integrity="sha384-Gn5384xqQ1aoWXA+058RXPxPg6fy4IWvTNh0E263XmFcJlSAwiGgFAW/dAiS6JXm" crossorigin="anonymous">
+    </head>
+    <body>
+        <div class="container-fluid">
+            <h1>The data is as of: $($currentDateTime) (UTC)</h1>
+            <table class="table table-striped table-hover table-sm">
+                <thead>
+                    <tr>
+                        <th>ServiceName</th>
+                        
+"@
+# <th>Pod Name</th>
+foreach ($header in $columnHeaders) {
+    $report += "<th>$header</th>"
+}
+
+$report += @"
+                    </tr>
+                </thead>
+                <tbody>
+"@
+
+foreach ($uniqueServiceName in $ServiceNames) 
+{
+    #Getting data where service name is null
+    if ($uniqueServiceName -eq "") 
+    {
+        #Filtering data with service name
+        $serviceResult = $InsightsQueryResult | Where-Object { $_.ServiceName -eq $uniqueServiceName }
+        $sortedServiceResult = $serviceResult | Sort-Object -Property Namespace
+        #Getting podname from the label and converting data from json
+        $podNames = $sortedServiceResult.podlabel |ConvertFrom-Json
+        $podcount = $podNames.Count
+        $ServiceNamesresult = @()
+        for($i = 0; $i -lt $podcount; $i++)
+        {
+            $ServiceNamesresult += $podNames[$i].app
+        }
+        #Sorting Service names
+        $UniqueServiceNamesresult= $ServiceNamesresult |Sort-Object -Unique
+        foreach($UniqueServiceNames in $UniqueServiceNamesresult) 
+        {
+            #Filtering data with service
+            $podNamesresult = $sortedServiceResult | Where-Object {$_.Name -match $UniqueServiceNames}
+            $rowCount = $podNamesresult.Count
+            $report += "<td ><b>$($UniqueServiceNames)</b></td>`r`n" 
+            # $podNamesdata = $podNamesresult.name | Sort-Object -Unique
+            $namespaceData = @{}
+            foreach ($header in $columnHeaders) {
+                $namespaceData[$header] = $null
+            }
+            $groupedResults = $podNamesresult
+            foreach ($result in $groupedResults) {
+                $splitNamespace = $result.Namespace.split('-')[-1]
+        
+                # Check if the splitNamespace is one of the column headers and add the result to the hashtable
+                if ($splitNamespace -in $columnHeaders) {
+                    # Get the data for the pod
+                    $podStatus = $result.PodStatus
+                    $namespace = $result.Namespace    
+                    $imagetag = $result.ImageTag  
+                    $createdtime = $result.PodCreationTimeStamp 
+        
+                    # Construct the HTML for item data
+                    $itemdata = "<b>Pod Name:&nbsp;</b>$($result.Name)`r`n"
+                    $itemdata += "<br><b>Status:&nbsp;</b>$podStatus`r`n"
+                    $itemdata += "<br><b>Created At:&nbsp;</b>$createdtime`r`n"
+                    $itemdata += "<br><b>NameSpace:&nbsp;</b>$namespace`r`n"
+                    $itemdata += "<br><b>ImageTag:&nbsp;</b>$imagetag`r`n"
+        
+                    # Determine the color based on pod status
+                    $color = if ($podStatus -match "fail") { "#ff0000" } else { "#FFFFFF" }
+        
+                    # Add the result to the hashtable
+                    $namespaceData[$splitNamespace] = "<td bgcolor='$color'>$itemdata</td>"
+                }
+        
+            }
+            foreach ($header in $columnHeaders) {
+                if ($namespaceData[$header]) {
+                    $resd = $namespaceData[$header]
+                    $report += "<td>$resd </td>"  
+                } 
+                else { 
+                    $report += "<td>NA</td>" 
+                }
+                
+            }
+        
+            $report += "</tr>`n"
+            
+        }
+    }
+    else {
+        $serviceResult = $InsightsQueryResult | Where-Object { $_.ServiceName -eq $uniqueServiceName }
+        $sortedServiceResult = $serviceResult | Sort-Object -Property Namespace
+        $podNames = $sortedServiceResult.Name |Sort-Object -Unique
+        $rowCount = $podNames.Count
+        $report += "<td rowspan=$rowcount ><b>$($uniqueServiceName)</b></td>`r`n"
+        foreach($podName In $podNames)
+        {
+            $podresult = $sortedServiceResult |Where-Object{$_.Name -like $podName}
+            $podStatus = $podresult.PodStatus
+            $namespace = $podresult.Namespace    
+            $imagetag = $podresult.ImageTag  
+            $createdtime = $podresult.PodCreationTimeStamp 
+            $itemdata += "<br>"
+            $itemdata += "<b>Pod Name:&nbsp;</b>"+$podName+"`r`n"
+            $itemdata += "<br>"
+            $itemdata += "<b>Status:&nbsp;</b>"+$podStatus+"`r`n"
+            $itemdata += "<br>"
+            $itemdata += "<b>Created At:&nbsp;</b>"+$createdtime+"`r`n"
+            $itemdata += "<br>"
+            $itemdata += "<b>NameSpace:&nbsp;</b>"+$NameSpace+"`r`n"
+            $itemdata += "<br>"
+            $itemdata += "<b>ImageTag:&nbsp;</b>"+$ImageTag+"`r`n"  
+            $itemdata += "<br>"
+            # $itemdata += "</tr>"
+            # $createdtime = $podresult.PodCrea
+            if ($podStatus -match "fail") 
+            {
+                $color = "#ff0000"
+            } 
+            else 
+            {
+                $color = "#FFFFFF"
+            }
+            foreach ($header in $columnHeaders) 
+            {
+                $splitnamespace = $Namespace.split('-')[-1]
+                if ($splitnamespace -eq $header)
+                {
+                    $report += "    <td bgcolor=$color onclick='expandCell(this)'>$($itemdata)</td>"
+                }  
+                else {
+                    $report += "<td>NA</td>"
+                }       
+            }              
+            $itemdata = $null
+            $report += "</tr>" 
+        }                  
+        $report += "</tr>"
+        # $podNamesdata
+    }           
+}
+$report += @"
+                </tbody>
+            </table>
+        </div>
+    </body>
+</html>
+"@
+
+
+$report | Out-File "KQueryReport.html"
+$namespaceData = $null
+$ServiceNames = $null
+$report = $null
+$uniqueServiceNamesresult = $null
+$podNames = $null
+$query = $null
+$ServiceNamesresult = $null
+$UniqueServiceNames = $null
+$podNamesresult = $null
+
+
+
+
+# $PodItemsData = @()
+            # foreach($podName In $podNamesdata)
+            # {
+            #     $podresult = $sortedServiceResult |Where-Object{$_.Name -like $podName}
+            #     $podStatus = $podresult.PodStatus
+            #     $namespace = $podresult.Namespace    
+            #     $imagetag = $podresult.ImageTag  
+            #     $createdtime = $podresult.PodCreationTimeStamp 
+            #     $itemdata += "<b>Pod Name:&nbsp;</b>"+$podName+"`r`n"
+            #     $itemdata += "<br>"
+            #     $itemdata += "<b>Status:&nbsp;</b>"+$podStatus+"`r`n"
+            #     $itemdata += "<br>"
+            #     $itemdata += "<b>Created At:&nbsp;</b>"+$createdtime+"`r`n"
+            #     $itemdata += "<br>"
+            #     $itemdata += "<b>NameSpace:&nbsp;</b>"+$NameSpace+"`r`n"
+            #     $itemdata += "<br>"
+            #     $itemdata += "<b>ImageTag:&nbsp;</b>"+$ImageTag+"`r`n"  
+            #     # $createdtime = $podresult.PodCrea
+            #     if ($podStatus -match "fail") 
+            #     {
+            #         $color = "#ff0000"
+            #     } 
+            #     else 
+            #     {
+            #         $color = "#FFFFFF"
+            #     }
+            #     # foreach ($header in $columnHeaders) 
+            #     # {
+            #         $splitnamespace = $Namespace.split('-')[-1]
+            #         if ($splitnamespace -eq $columnHeaders)
+            #         {
+            #             $report += "    <td bgcolor=$color onclick='expandCell(this)'>$($itemdata)</td>"
+            #         }  
+            #         else {
+            #             $report += "<td>NA</td>"
+            #         } 
+                      
+            #     # }              
+            #     $itemdata = $null
+            #     $report += "</tr>" 
+            # }  
